@@ -64,9 +64,19 @@ func _update_zoom(delta: float) -> void:
 	var ball_flat: Vector3 = Vector3(_ball.global_position.x, 0.0, _ball.global_position.z)
 	var separation: float = player_flat.distance_to(ball_flat)
 	var zoom_blend: float = clampf(separation / MAX_SEPARATION_FOR_ZOOM, 0.0, 1.0)
-	var target_distance: float = lerpf(minimum_zoom_distance, maximum_zoom_distance, zoom_blend)
+	var minimum_distance: float = minf(minimum_zoom_distance, maximum_zoom_distance)
+	var maximum_distance: float = maxf(minimum_zoom_distance, maximum_zoom_distance)
+	var target_distance: float = clampf(
+		lerpf(minimum_zoom_distance, maximum_zoom_distance, zoom_blend),
+		minimum_distance,
+		maximum_distance
+	)
 	var blend: float = clampf(zoom_smoothing * delta, 0.0, 1.0)
-	_zoom_distance = lerpf(_zoom_distance, target_distance, blend)
+	_zoom_distance = clampf(
+		lerpf(_zoom_distance, target_distance, blend),
+		minimum_distance,
+		maximum_distance
+	)
 
 
 func _update_anchor(focus: Vector3, delta: float) -> void:

@@ -9,13 +9,20 @@ enum MovementState {
 	STOPPING,
 }
 
+const LOOSE_PLAYER_LAYER: int = 2
+const LOOSE_PLAYER_MASK: int = 5
+const POSSESSION_AREA_MASK: int = 4
+
 @export var walk_speed: float = 5.0
 @export var sprint_speed: float = 8.5
 @export var acceleration: float = 12.0
 @export var rotation_speed: float = 10.0
 @export var gravity: float = 9.8
+@export var possession_debug_enabled: bool = true
 
 @onready var mesh: MeshInstance3D = $MeshInstance3D
+@onready var _possession_area: Area3D = $PossessionArea
+@onready var _possession_debug_label: Label3D = $DebugLabel
 
 var _camera: Camera3D
 var _last_move_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
@@ -23,12 +30,22 @@ var _requested_move_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
 var _possessed_ball: Node3D = null
 var _dribble_speed_multiplier: float = 1.0
 var _dribble_rotation_speed: float = -1.0
+var _tracked_ball: Node3D = null
 
 
 func _ready() -> void:
+	collision_layer = LOOSE_PLAYER_LAYER
+	collision_mask = LOOSE_PLAYER_MASK
+
 	_camera = get_tree().get_first_node_in_group("broadcast_camera") as Camera3D
 	_last_move_direction = get_facing_direction()
 	_requested_move_direction = _last_move_direction
+
+	_possession_area.body_entered.connect(_on_possession_area_body_entered)
+	_possession_debug_label.visible = possession_debug_enabled
+	$PossessionArea/DebugMesh.visible = possession_debug_enabled
+
+	call_deferred("_run_startup_self_check")
 
 
 func _physics_process(delta: float) -> void:
@@ -67,6 +84,111 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 	_update_last_move_direction()
+
+	if not has_possession():
+		for body: Node3D in _possession_area.get_overlapping_bodies():
+			_try_acquire_from_body(body)
+
+	_update_possession_debug()
+
+
+func _on_possession_area_body_entered(body: Node3D) -> void:
+	_try_acquire_from_body(body)
+
+
+func _try_acquire_from_body(body: Node3D) -> void:
+	if has_possession():
+		return
+	if not body.is_in_group("soccer_ball"):
+		return
+	if body.has_method("is_loose") and not body.is_loose():
+		return
+	if not body.has_method("try_acquire_possession"):
+		return
+	body.try_acquire_possession(self)
+
+
+func _run_startup_self_check() -> void:
+	var ball: Node = get_tree().get_first_node_in_group("soccer_ball")
+	var checks_ok: bool = true
+
+	print("[Startup Check] Player layer=%d mask=%d" % [collision_layer, collision_mask])
+	if ball != null:
+		print(
+			"[Startup Check] Ball layer=%d mask=%d in_group=%s"
+			% [ball.collision_layer, ball.collision_mask, ball.is_in_group("soccer_ball")]
+		)
+	else:
+		push_error("[Startup Check] ERROR: No node in group 'soccer_ball'")
+		checks_ok = false
+
+	print(
+		"[Startup Check] PossessionArea layer=%d mask=%d monitoring=%s"
+		% [_possession_area.collision_layer, _possession_area.collision_mask, str(_possession_area.monitoring)]
+	)
+
+	if collision_layer != LOOSE_PLAYER_LAYER:
+		push_error("[Startup Check] ERROR: Player layer should be %d" % LOOSE_PLAYER_LAYER)
+		checks_ok = false
+	if collision_mask != LOOSE_PLAYER_MASK:
+		push_error("[Startup Check] ERROR: Player mask should be %d" % LOOSE_PLAYER_MASK)
+		checks_ok = false
+	if ball != null and ball.collision_layer != 4:
+		push_error("[Startup Check] ERROR: Ball layer should be 4 (layer 3)")
+		checks_ok = false
+	if ball != null and ball.collision_mask != 3:
+		push_error("[Startup Check] ERROR: Ball mask should be 3")
+		checks_ok = false
+	if _possession_area.collision_mask != POSSESSION_AREA_MASK:
+		push_error("[Startup Check] ERROR: PossessionArea mask should be %d" % POSSESSION_AREA_MASK)
+		checks_ok = false
+	if not _possession_area.monitoring:
+		push_error("[Startup Check] ERROR: PossessionArea monitoring is disabled")
+		checks_ok = false
+	if ball != null and not ball.is_in_group("soccer_ball"):
+		push_error("[Startup Check] ERROR: Ball is not in group 'soccer_ball'")
+		checks_ok = false
+
+	if checks_ok:
+		print("[Startup Check] All possession collision checks passed")
+
+
+func _update_possession_debug() -> void:
+	if not possession_debug_enabled:
+		return
+
+	_tracked_ball = _find_nearest_soccer_ball()
+	var ball_detected: bool = _tracked_ball != null
+	var ball_state: String = "n/a"
+	var distance: float = -1.0
+
+	if _tracked_ball != null:
+		distance = global_position.distance_to(_tracked_ball.global_position)
+		if _tracked_ball.has_method("get_possession_state_name"):
+			ball_state = _tracked_ball.get_possession_state_name()
+
+	_possession_debug_label.text = (
+		"ball detected: %s\nball state: %s\npossession acquired: %s\ndistance: %.2f"
+		% [
+			"yes" if ball_detected else "no",
+			ball_state,
+			"yes" if has_possession() else "no",
+			distance,
+		]
+	)
+
+
+func _find_nearest_soccer_ball() -> Node3D:
+	var nearest: Node3D = null
+	var nearest_distance: float = INF
+	for body: Node3D in _possession_area.get_overlapping_bodies():
+		if not body.is_in_group("soccer_ball"):
+			continue
+		var distance: float = global_position.distance_to(body.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = body
+	return nearest
 
 
 func has_possession() -> bool:

@@ -1,4 +1,4 @@
-[gd_scene load_steps=6 format=3 uid="uid://bball001scene"]
+[gd_scene load_steps=5 format=3 uid="uid://bball001scene"]
 
 [ext_resource type="Script" path="res://scripts/ball.gd" id="1_ball_script"]
 
@@ -12,10 +12,7 @@ height = 0.22
 [sub_resource type="SphereShape3D" id="SphereShape3D_ball"]
 radius = 0.11
 
-[sub_resource type="SphereShape3D" id="SphereShape3D_acquisition"]
-radius = 1.1
-
-[node name="Ball" type="RigidBody3D"]
+[node name="Ball" type="RigidBody3D" groups=["soccer_ball"]]
 collision_layer = 4
 collision_mask = 3
 script = ExtResource("1_ball_script")
@@ -26,11 +23,3 @@ surface_material_override/0 = SubResource("StandardMaterial3D_ball")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
 shape = SubResource("SphereShape3D_ball")
-
-[node name="AcquisitionArea" type="Area3D" parent="."]
-collision_layer = 0
-collision_mask = 2
-monitorable = false
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="AcquisitionArea"]
-shape = SubResource("SphereShape3D_acquisition")

@@ -17,8 +17,8 @@ enum FootSide {
 	RIGHT = 1,
 }
 
-const PLAYER_COLLISION_LAYER: int = 2
-const BALL_COLLISION_LAYER: int = 3
+const LOOSE_BALL_LAYER: int = 4
+const LOOSE_BALL_MASK: int = 3
 
 @export_group("Physics")
 @export var ball_mass: float = 0.43
@@ -27,14 +27,6 @@ const BALL_COLLISION_LAYER: int = 3
 @export var friction: float = 0.8
 @export var bounce: float = 0.6
 @export var max_speed: float = 15.0
-
-@export_group("Possession")
-@export var possession_acquisition_radius: float = 1.1
-@export var normal_control_radius: float = 2.0
-@export var emergency_recovery_radius: float = 3.6
-@export var loose_ball_max_controllable_speed: float = 4.0
-@export var loose_ball_max_ground_height: float = 0.6
-@export var reacquisition_cooldown: float = 0.25
 
 @export_group("Touch Dribbling")
 @export var walk_touch_distance: float = 0.45
@@ -63,35 +55,37 @@ const BALL_COLLISION_LAYER: int = 3
 @export var lateral_control_strength: float = 4.5
 @export var stop_control_strength: float = 7.0
 @export var maximum_recovery_force: float = 22.0
-@export var external_impulse_release_threshold: float = 9.0
+@export var normal_control_radius: float = 2.0
+@export var emergency_recovery_radius: float = 3.6
 @export var stationary_ball_offset: float = 0.38
+
+@export_group("Simple Possession Control")
+@export var use_simple_possession_control: bool = true
+@export var simple_position_gain: float = 7.0
+@export var simple_velocity_gain: float = 9.0
+@export var simple_max_correction_speed: float = 12.0
+@export var simple_max_control_force: float = 28.0
 
 @export_group("Debug")
 @export var debug_enabled: bool = false
 
 var _physics_material: PhysicsMaterial
-var _player: PlayerCharacter = null
 var _possession_state: PossessionState = PossessionState.LOOSE
 var _possessor: PlayerCharacter = null
 var _touch_cooldown: float = 0.0
 var _expected_flat_velocity: Vector3 = Vector3.ZERO
-var _reacquire_cooldown: float = 0.0
-var _possession_grace_timer: float = 0.0
-var _emergency_recovery_active: bool = false
-var _possession_collision_exempt: bool = false
-var _default_ball_collision_mask: int = 0
-var _default_player_collision_mask: int = 0
+var _dribble_enabled: bool = false
 var _turn_state: TurnState = TurnState.NORMAL_DRIBBLE
 var _turn_state_timer: float = 0.0
 var _stable_dribble_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
 var _target_turn_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
 var _current_turn_angle: float = 0.0
 var _debug_target: Vector3 = Vector3.ZERO
+var _current_dribble_target: Vector3 = Vector3.ZERO
+var _current_movement_state: PlayerCharacter.MovementState = PlayerCharacter.MovementState.STATIONARY
+var _debug_print_timer: float = 0.0
 var _debug_target_marker: MeshInstance3D
 var _debug_label: Label3D
-
-@onready var _acquisition_area: Area3D = $AcquisitionArea
-@onready var _acquisition_shape: CollisionShape3D = $AcquisitionArea/CollisionShape3D
 
 
 func _ready() -> void:
@@ -105,33 +99,192 @@ func _ready() -> void:
 	_physics_material.bounce = bounce
 	physics_material_override = _physics_material
 
-	_default_ball_collision_mask = collision_mask
-	_update_acquisition_area_radius()
+	_reset_loose_collision_settings()
+	_possession_state = PossessionState.LOOSE
+	_possessor = null
+	_dribble_enabled = false
+	can_sleep = true
 
-	call_deferred("_resolve_player")
 	call_deferred("_setup_debug_visuals")
+	call_deferred("_run_startup_self_check")
 
 
-func _resolve_player() -> void:
-	if _player != null and is_instance_valid(_player):
+func _physics_process(delta: float) -> void:
+	_touch_cooldown = maxf(_touch_cooldown - delta, 0.0)
+
+	if _has_valid_possessor() and _dribble_enabled:
+		_current_movement_state = _possessor.get_movement_state()
+		if use_simple_possession_control:
+			_current_dribble_target = _compute_simple_dribble_target(_current_movement_state)
+		else:
+			_update_turn_state(delta)
+			_current_dribble_target = _compute_dribble_target(_current_movement_state)
+		_debug_target = _current_dribble_target
+
+	if debug_enabled:
+		_update_debug_visuals()
+		_debug_print_timer -= delta
+		if _debug_print_timer <= 0.0:
+			_debug_print_timer = 1.0
+			_print_possession_debug()
+
+
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	if state.sleeping and _possession_state == PossessionState.POSSESSED:
+		state.sleeping = false
+
+	if _has_valid_possessor() and _dribble_enabled:
+		if use_simple_possession_control:
+			_apply_simple_possession_control(state)
+		else:
+			_apply_possession_dribble(state)
+
+	var linear_velocity: Vector3 = state.linear_velocity
+	if linear_velocity.length() > max_speed:
+		state.linear_velocity = linear_velocity.normalized() * max_speed
+
+
+func is_loose() -> bool:
+	return _possession_state == PossessionState.LOOSE
+
+
+func try_acquire_possession(player: PlayerCharacter) -> bool:
+	if _possession_state != PossessionState.LOOSE:
+		return false
+	if player == null or not is_instance_valid(player):
+		return false
+
+	_possession_state = PossessionState.POSSESSED
+	_possessor = player
+	_dribble_enabled = true
+	_touch_cooldown = 0.0
+	_turn_state = TurnState.NORMAL_DRIBBLE
+	_turn_state_timer = 0.0
+	_stable_dribble_direction = _get_primary_control_direction(player)
+	_current_movement_state = player.get_movement_state()
+	_current_dribble_target = _compute_simple_dribble_target(_current_movement_state)
+	_debug_target = _current_dribble_target
+	can_sleep = false
+	sleeping = false
+
+	player.notify_possession_gained(self)
+	_add_collision_exception(player)
+
+	print("[POSSESSION] Player acquired Ball")
+	return true
+
+
+func has_possession() -> bool:
+	return _possession_state == PossessionState.POSSESSED
+
+
+func get_possessor() -> PlayerCharacter:
+	return _possessor
+
+
+func get_possession_state() -> PossessionState:
+	return _possession_state
+
+
+func get_possession_state_name() -> String:
+	return "LOOSE" if _possession_state == PossessionState.LOOSE else "POSSESSED"
+
+
+func get_turn_state() -> TurnState:
+	return _turn_state
+
+
+func release_for_pass() -> void:
+	_release_possession()
+
+
+func release_for_shot() -> void:
+	_release_possession()
+
+
+func release_for_tackle() -> void:
+	_release_possession()
+
+
+func release_for_deflection() -> void:
+	_release_possession()
+
+
+func release_as_loose_ball() -> void:
+	_release_possession()
+
+
+func _release_possession() -> void:
+	if _possession_state != PossessionState.POSSESSED:
 		return
 
-	var candidate: Node = get_tree().get_first_node_in_group("player")
-	if candidate is PlayerCharacter:
-		_player = candidate
-		_default_player_collision_mask = _player.collision_mask
-		_debug_acquisition("Resolved PlayerCharacter: %s" % _player.name)
-	elif candidate != null:
-		_debug_acquisition("Player group node is not PlayerCharacter: %s" % candidate.get_class())
-	else:
-		_debug_acquisition("No node found in group 'player'")
+	var releasing_possessor: PlayerCharacter = _possessor
+	_clear_collision_exception(releasing_possessor)
+
+	if releasing_possessor != null and releasing_possessor.has_method("notify_possession_lost"):
+		releasing_possessor.notify_possession_lost()
+
+	_possession_state = PossessionState.LOOSE
+	_possessor = null
+	_dribble_enabled = false
+	can_sleep = true
+	_expected_flat_velocity = Vector3.ZERO
+	_turn_state = TurnState.NORMAL_DRIBBLE
+	_turn_state_timer = 0.0
 
 
-func _update_acquisition_area_radius() -> void:
-	if _acquisition_shape == null or _acquisition_shape.shape is not SphereShape3D:
+func _reset_loose_collision_settings() -> void:
+	collision_layer = LOOSE_BALL_LAYER
+	collision_mask = LOOSE_BALL_MASK
+
+
+func _add_collision_exception(player: PlayerCharacter) -> void:
+	player.add_collision_exception_with(self)
+	add_collision_exception_with(player)
+
+
+func _clear_collision_exception(player: PlayerCharacter = null) -> void:
+	var target_player: PlayerCharacter = player if player != null else _possessor
+	if target_player == null or not is_instance_valid(target_player):
 		return
-	var sphere: SphereShape3D = _acquisition_shape.shape as SphereShape3D
-	sphere.radius = possession_acquisition_radius
+	if target_player.get_collision_exceptions().has(self):
+		target_player.remove_collision_exception_with(self)
+	if get_collision_exceptions().has(target_player):
+		remove_collision_exception_with(target_player)
+
+
+func _run_startup_self_check() -> void:
+	print("[Startup Check] Ball layer=%d mask=%d" % [collision_layer, collision_mask])
+	print("[Startup Check] Ball in_group soccer_ball=%s" % str(is_in_group("soccer_ball")))
+
+	var checks_ok: bool = true
+	if collision_layer != LOOSE_BALL_LAYER:
+		push_error("[Startup Check] ERROR: Ball layer should be %d" % LOOSE_BALL_LAYER)
+		checks_ok = false
+	if collision_mask != LOOSE_BALL_MASK:
+		push_error("[Startup Check] ERROR: Ball mask should be %d" % LOOSE_BALL_MASK)
+		checks_ok = false
+	if not is_in_group("soccer_ball"):
+		push_error("[Startup Check] ERROR: Ball is not in group 'soccer_ball'")
+		checks_ok = false
+	if _possession_state != PossessionState.LOOSE:
+		push_error("[Startup Check] ERROR: Ball should start LOOSE")
+		checks_ok = false
+	if _possessor != null:
+		push_error("[Startup Check] ERROR: Ball should start with no possessor")
+		checks_ok = false
+	if _dribble_enabled:
+		push_error("[Startup Check] ERROR: Dribbling controller should start disabled")
+		checks_ok = false
+	if not can_sleep:
+		push_error("[Startup Check] ERROR: Loose ball should be allowed to sleep")
+		checks_ok = false
+	if not get_collision_exceptions().is_empty():
+		push_error("[Startup Check] ERROR: Ball should start with no collision exceptions")
+		checks_ok = false
+
+	if checks_ok:
+		print("[Startup Check] Ball possession startup checks passed")
 
 
 func _setup_debug_visuals() -> void:
@@ -157,197 +310,6 @@ func _setup_debug_visuals() -> void:
 	_debug_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_debug_label.visible = false
 	add_child.call_deferred(_debug_label)
-
-
-func _physics_process(delta: float) -> void:
-	_touch_cooldown = maxf(_touch_cooldown - delta, 0.0)
-	_reacquire_cooldown = maxf(_reacquire_cooldown - delta, 0.0)
-	_possession_grace_timer = maxf(_possession_grace_timer - delta, 0.0)
-
-	if _player == null:
-		_resolve_player()
-
-	if _possession_state == PossessionState.LOOSE:
-		_restore_loose_ball_collision()
-
-	_update_possession_state()
-	if _possession_state == PossessionState.POSSESSED and _possessor != null:
-		_update_turn_state(delta)
-	_update_debug_visuals()
-
-
-func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
-	if state.sleeping and _possession_state == PossessionState.POSSESSED:
-		state.sleeping = false
-
-	if _possession_state == PossessionState.POSSESSED and _possessor != null:
-		_apply_possession_dribble(state)
-
-	var linear_velocity: Vector3 = state.linear_velocity
-	if linear_velocity.length() > max_speed:
-		state.linear_velocity = linear_velocity.normalized() * max_speed
-
-
-func has_possession() -> bool:
-	return _possession_state == PossessionState.POSSESSED
-
-
-func get_possessor() -> PlayerCharacter:
-	return _possessor
-
-
-func get_possession_state() -> PossessionState:
-	return _possession_state
-
-
-func get_turn_state() -> TurnState:
-	return _turn_state
-
-
-func release_for_pass() -> void:
-	_release_possession(true)
-
-
-func release_for_shot() -> void:
-	_release_possession(true)
-
-
-func release_for_tackle() -> void:
-	_release_possession(true)
-
-
-func release_for_deflection() -> void:
-	_release_possession(true)
-
-
-func release_as_loose_ball() -> void:
-	_release_possession(true)
-
-
-func _release_possession(apply_reacquire_cooldown: bool = true) -> void:
-	var releasing_possessor: PlayerCharacter = _possessor
-	_restore_loose_ball_collision(releasing_possessor)
-	if releasing_possessor != null and releasing_possessor.has_method("notify_possession_lost"):
-		releasing_possessor.notify_possession_lost()
-	_possession_state = PossessionState.LOOSE
-	_possessor = null
-	_emergency_recovery_active = false
-	if apply_reacquire_cooldown:
-		_reacquire_cooldown = reacquisition_cooldown
-	_expected_flat_velocity = Vector3.ZERO
-	_turn_state = TurnState.NORMAL_DRIBBLE
-	_turn_state_timer = 0.0
-	_debug_acquisition("Possession released")
-
-
-func _acquire_possession(player: PlayerCharacter) -> void:
-	_possession_state = PossessionState.POSSESSED
-	_possessor = player
-	_touch_cooldown = 0.0
-	_turn_state = TurnState.NORMAL_DRIBBLE
-	_turn_state_timer = 0.0
-	_stable_dribble_direction = _get_primary_control_direction()
-	if player.has_method("notify_possession_gained"):
-		player.notify_possession_gained(self)
-	_apply_possession_collision_exempt()
-	_possession_grace_timer = 0.35
-	_debug_acquisition("Possession acquired by %s" % player.name)
-
-
-func _restore_loose_ball_collision(player: PlayerCharacter = null) -> void:
-	var target_player: PlayerCharacter = player if player != null else _player
-	collision_mask = _default_ball_collision_mask
-	set_collision_mask_value(PLAYER_COLLISION_LAYER, true)
-	if target_player != null and is_instance_valid(target_player):
-		target_player.collision_mask = _default_player_collision_mask
-		target_player.set_collision_mask_value(BALL_COLLISION_LAYER, true)
-	_possession_collision_exempt = false
-
-
-func _apply_possession_collision_exempt() -> void:
-	if _possessor == null:
-		return
-	_possessor.set_collision_mask_value(BALL_COLLISION_LAYER, false)
-	set_collision_mask_value(PLAYER_COLLISION_LAYER, false)
-	_possession_collision_exempt = true
-
-
-func _update_possession_state() -> void:
-	if _possession_state == PossessionState.LOOSE:
-		if _reacquire_cooldown > 0.0:
-			_debug_acquisition("Acquisition blocked by cooldown: %.2fs" % _reacquire_cooldown)
-			return
-		_try_acquire_from_candidates()
-		return
-
-	if _possessor == null:
-		_release_possession(false)
-		return
-
-	var distance_to_possessor: float = _flat_distance_to(_possessor.global_position)
-	_emergency_recovery_active = distance_to_possessor > normal_control_radius
-
-	if distance_to_possessor > emergency_recovery_radius:
-		_debug_acquisition("Emergency release: distance %.2f" % distance_to_possessor)
-		release_as_loose_ball()
-		return
-
-	if _detect_external_impulse():
-		_debug_acquisition("External impulse release")
-		release_as_loose_ball()
-
-
-func _try_acquire_from_candidates() -> void:
-	var candidates: Array[PlayerCharacter] = _get_acquisition_candidates()
-	if candidates.is_empty():
-		return
-
-	for candidate: PlayerCharacter in candidates:
-		var distance: float = _flat_distance_to(candidate.global_position)
-		_debug_acquisition("Candidate detected: %s distance %.2f" % [candidate.name, distance])
-		if not _passes_acquisition_conditions(candidate, distance):
-			continue
-		_acquire_possession(candidate)
-		return
-
-
-func _get_acquisition_candidates() -> Array[PlayerCharacter]:
-	var candidates: Array[PlayerCharacter] = []
-
-	if _acquisition_area != null:
-		for body: Node3D in _acquisition_area.get_overlapping_bodies():
-			if body is PlayerCharacter and body not in candidates:
-				candidates.append(body)
-
-	if _player != null and _player not in candidates:
-		var distance: float = _flat_distance_to(_player.global_position)
-		if distance <= possession_acquisition_radius:
-			candidates.append(_player)
-
-	return candidates
-
-
-func _passes_acquisition_conditions(candidate: PlayerCharacter, distance: float) -> bool:
-	if distance > possession_acquisition_radius:
-		_debug_acquisition("Failed: outside radius (%.2f > %.2f)" % [distance, possession_acquisition_radius])
-		return false
-	if global_position.y > loose_ball_max_ground_height:
-		_debug_acquisition("Failed: ball too high (y=%.2f)" % global_position.y)
-		return false
-	if _get_flat_speed() > loose_ball_max_controllable_speed:
-		_debug_acquisition("Failed: ball too fast (%.2f)" % _get_flat_speed())
-		return false
-	if candidate == null or not is_instance_valid(candidate):
-		_debug_acquisition("Failed: invalid candidate")
-		return false
-
-	_debug_acquisition("Acquisition conditions passed for %s" % candidate.name)
-	return true
-
-
-func _debug_acquisition(message: String) -> void:
-	if debug_enabled:
-		print("[Ball Acquisition] ", message)
 
 
 func _update_turn_state(delta: float) -> void:
@@ -438,27 +400,82 @@ func _get_requested_turn_angle() -> float:
 	return _stable_dribble_direction.angle_to(_possessor.get_requested_move_direction())
 
 
-func _get_primary_control_direction() -> Vector3:
-	if _possessor == null:
-		return Vector3(0.0, 0.0, -1.0)
-	if _possessor.has_movement_input():
-		return _possessor.get_requested_move_direction()
-	return _possessor.get_facing_direction()
+func _get_primary_control_direction(player: PlayerCharacter) -> Vector3:
+	if player.has_movement_input():
+		return player.get_requested_move_direction()
+	return player.get_facing_direction()
 
 
-func _detect_external_impulse() -> bool:
-	if _possession_grace_timer > 0.0:
-		return false
-	if _turn_state != TurnState.NORMAL_DRIBBLE:
-		return false
-	var actual: Vector3 = _get_flat_velocity()
-	var delta_velocity: float = (actual - _expected_flat_velocity).length()
-	return delta_velocity > external_impulse_release_threshold
+func _has_valid_possessor() -> bool:
+	return (
+		_possession_state == PossessionState.POSSESSED
+		and _possessor != null
+		and is_instance_valid(_possessor)
+	)
+
+
+func _compute_simple_dribble_target(
+	movement_state: PlayerCharacter.MovementState
+) -> Vector3:
+	var moving: bool = (
+		_possessor.has_movement_input()
+		and movement_state != PlayerCharacter.MovementState.STATIONARY
+		and movement_state != PlayerCharacter.MovementState.STOPPING
+	)
+	var control_direction: Vector3 = (
+		_possessor.get_requested_move_direction()
+		if moving
+		else _possessor.get_facing_direction()
+	)
+	control_direction.y = 0.0
+	if control_direction.length_squared() <= 0.0001:
+		control_direction = Vector3(0.0, 0.0, -1.0)
+	else:
+		control_direction = control_direction.normalized()
+
+	var target_distance: float = (
+		_get_touch_distance(movement_state)
+		if moving
+		else stationary_ball_offset
+	)
+	var right_direction: Vector3 = Vector3.UP.cross(control_direction).normalized()
+	var foot_offset: Vector3 = (
+		right_direction * possession_ball_side_offset * float(preferred_foot_side)
+	)
+	var target: Vector3 = (
+		_flat_position(_possessor.global_position)
+		+ control_direction * target_distance
+		+ foot_offset
+	)
+	target.y = _possessor.global_position.y + 0.11
+	return target
+
+
+func _apply_simple_possession_control(state: PhysicsDirectBodyState3D) -> void:
+	var ball_flat: Vector3 = _flat_position(state.transform.origin)
+	var target_flat: Vector3 = _flat_position(_current_dribble_target)
+	var position_error: Vector3 = target_flat - ball_flat
+	var player_velocity: Vector3 = _possessor.get_flat_velocity()
+	var desired_velocity: Vector3 = (
+		player_velocity + position_error * simple_position_gain
+	).limit_length(simple_max_correction_speed)
+	var ball_velocity: Vector3 = Vector3(
+		state.linear_velocity.x,
+		0.0,
+		state.linear_velocity.z
+	)
+	var velocity_error: Vector3 = desired_velocity - ball_velocity
+	var control_force: Vector3 = (
+		velocity_error * simple_velocity_gain * mass
+	).limit_length(simple_max_control_force)
+
+	state.apply_central_force(control_force)
+	_expected_flat_velocity = desired_velocity
 
 
 func _apply_possession_dribble(state: PhysicsDirectBodyState3D) -> void:
-	var movement_state: PlayerCharacter.MovementState = _possessor.get_movement_state()
-	var dribble_target: Vector3 = _compute_dribble_target(movement_state)
+	var movement_state: PlayerCharacter.MovementState = _current_movement_state
+	var dribble_target: Vector3 = _current_dribble_target
 	_debug_target = dribble_target
 
 	var ball_flat: Vector3 = _flat_position(state.transform.origin)
@@ -487,7 +504,7 @@ func _apply_possession_dribble(state: PhysicsDirectBodyState3D) -> void:
 	var velocity_force: Vector3 = velocity_error * guidance_strength
 	var total_force: Vector3 = forward_force + lateral_force + velocity_force
 
-	if _emergency_recovery_active and _turn_state == TurnState.NORMAL_DRIBBLE:
+	if distance_to_possessor > normal_control_radius and _turn_state == TurnState.NORMAL_DRIBBLE:
 		var recovery_scale: float = clampf(
 			(distance_to_possessor - normal_control_radius)
 			/ maxf(emergency_recovery_radius - normal_control_radius, 0.001),
@@ -626,14 +643,6 @@ func _flat_distance_to(world_position: Vector3) -> float:
 	return _flat_position(global_position).distance_to(_flat_position(world_position))
 
 
-func _get_flat_velocity() -> Vector3:
-	return Vector3(linear_velocity.x, 0.0, linear_velocity.z)
-
-
-func _get_flat_speed() -> float:
-	return _get_flat_velocity().length()
-
-
 func _turn_state_name() -> String:
 	match _turn_state:
 		TurnState.NORMAL_DRIBBLE:
@@ -669,14 +678,62 @@ func _update_debug_visuals() -> void:
 			requested = str(_possessor.get_requested_move_direction().round())
 			facing = str(_possessor.get_facing_direction().round())
 		_debug_label.text = (
-			"Possession: %s\nTurn: %s\nAngle: %.1f\nRequested: %s\nFacing: %s\nTarget: %s\nCollision assist: %s"
+			"Possession: %s\nTurn: %s\nAngle: %.1f\nRequested: %s\nFacing: %s\nTarget: %s"
 			% [
-				"POSSESSED" if _possession_state == PossessionState.POSSESSED else "LOOSE",
+				get_possession_state_name(),
 				_turn_state_name(),
 				rad_to_deg(_current_turn_angle),
 				requested,
 				facing,
 				str(_debug_target.round()),
-				str(_possession_collision_exempt),
 			]
 		)
+
+
+func _print_possession_debug() -> void:
+	var possessor_valid: bool = _has_valid_possessor()
+	var player_position: Variant = "n/a"
+	var player_distance: float = -1.0
+	var requested_direction: Variant = "n/a"
+	var movement_state_name: String = "n/a"
+
+	if possessor_valid:
+		player_position = _possessor.global_position
+		player_distance = _flat_distance_to(_possessor.global_position)
+		requested_direction = _possessor.get_requested_move_direction()
+		movement_state_name = _movement_state_name(_current_movement_state)
+
+	print(
+		(
+			"[Possession Debug] state=%s possessor_valid=%s player=%s ball=%s "
+			+ "distance=%.2f requested=%s movement=%s target=%s velocity=%s simple=%s"
+		)
+		% [
+			get_possession_state_name(),
+			"yes" if possessor_valid else "no",
+			str(player_position),
+			str(global_position),
+			player_distance,
+			str(requested_direction),
+			movement_state_name,
+			str(_current_dribble_target),
+			str(linear_velocity),
+			"yes" if use_simple_possession_control else "no",
+		]
+	)
+
+
+func _movement_state_name(movement_state: PlayerCharacter.MovementState) -> String:
+	match movement_state:
+		PlayerCharacter.MovementState.STATIONARY:
+			return "STATIONARY"
+		PlayerCharacter.MovementState.WALK:
+			return "WALK"
+		PlayerCharacter.MovementState.JOG:
+			return "JOG"
+		PlayerCharacter.MovementState.SPRINT:
+			return "SPRINT"
+		PlayerCharacter.MovementState.STOPPING:
+			return "STOPPING"
+		_:
+			return "UNKNOWN"
