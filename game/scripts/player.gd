@@ -13,11 +13,13 @@ const LOOSE_PLAYER_LAYER: int = 2
 const LOOSE_PLAYER_MASK: int = 5
 const POSSESSION_AREA_MASK: int = 4
 
+@export var is_user_controlled: bool = true
 @export var walk_speed: float = 5.0
 @export var sprint_speed: float = 8.5
 @export var acceleration: float = 12.0
 @export var rotation_speed: float = 10.0
 @export var gravity: float = 9.8
+@export var short_pass_speed: float = 9.0
 @export var possession_debug_enabled: bool = true
 
 @onready var mesh: MeshInstance3D = $MeshInstance3D
@@ -49,14 +51,17 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	_update_requested_move_direction()
+	if is_user_controlled:
+		_update_requested_move_direction()
 
-	var input_dir: Vector2 = Input.get_vector(
-		InputActions.MOVE_LEFT,
-		InputActions.MOVE_RIGHT,
-		InputActions.MOVE_FORWARD,
-		InputActions.MOVE_BACK
-	)
+	var input_dir: Vector2 = Vector2.ZERO
+	if is_user_controlled:
+		input_dir = Input.get_vector(
+			InputActions.MOVE_LEFT,
+			InputActions.MOVE_RIGHT,
+			InputActions.MOVE_FORWARD,
+			InputActions.MOVE_BACK
+		)
 	var direction: Vector3 = Vector3.ZERO
 
 	if input_dir.length_squared() > 0.0 and _camera != null:
@@ -66,7 +71,7 @@ func _physics_process(delta: float) -> void:
 		if direction.length_squared() > 0.0001:
 			direction = direction.normalized()
 
-	var sprint_strength: float = Input.get_action_strength(InputActions.SPRINT)
+	var sprint_strength: float = get_sprint_strength()
 	var target_speed: float = lerpf(walk_speed, sprint_speed, sprint_strength) * _dribble_speed_multiplier
 
 	if direction.length_squared() > 0.0:
@@ -88,6 +93,9 @@ func _physics_process(delta: float) -> void:
 	if not has_possession():
 		for body: Node3D in _possession_area.get_overlapping_bodies():
 			_try_acquire_from_body(body)
+
+	if is_user_controlled and has_possession() and Input.is_action_just_pressed(InputActions.SHORT_PASS):
+		perform_short_pass()
 
 	_update_possession_debug()
 
@@ -225,7 +233,44 @@ func get_dribble_speed_multiplier() -> float:
 	return _dribble_speed_multiplier
 
 
+func perform_short_pass() -> void:
+	var ball: Node3D = _possessed_ball
+	if ball == null or not ball.has_method("perform_pass"):
+		return
+	ball.perform_pass(_get_pass_direction(), short_pass_speed)
+
+
+func _get_pass_direction() -> Vector3:
+	if has_movement_input():
+		return get_requested_move_direction()
+
+	var teammate: PlayerCharacter = _find_nearest_other_player()
+	if teammate != null:
+		var to_teammate: Vector3 = teammate.global_position - global_position
+		to_teammate.y = 0.0
+		if to_teammate.length_squared() > 0.0001:
+			return to_teammate.normalized()
+
+	return get_facing_direction()
+
+
+func _find_nearest_other_player() -> PlayerCharacter:
+	var nearest: PlayerCharacter = null
+	var nearest_distance: float = INF
+	for node: Node in get_tree().get_nodes_in_group("player"):
+		if node == self or node is not PlayerCharacter:
+			continue
+		var other: PlayerCharacter = node
+		var distance: float = global_position.distance_to(other.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = other
+	return nearest
+
+
 func has_movement_input() -> bool:
+	if not is_user_controlled:
+		return false
 	return Input.get_vector(
 		InputActions.MOVE_LEFT,
 		InputActions.MOVE_RIGHT,
@@ -264,6 +309,8 @@ func get_move_direction() -> Vector3:
 
 
 func get_sprint_strength() -> float:
+	if not is_user_controlled:
+		return 0.0
 	return Input.get_action_strength(InputActions.SPRINT)
 
 

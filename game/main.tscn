@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3 uid="uid://27iapsqeihbc"]
+[gd_scene load_steps=8 format=3 uid="uid://27iapsqeihbc"]
 
 [ext_resource type="PackedScene" uid="uid://bpracticefield001" path="res://scenes/practice_field.tscn" id="1_field"]
 [ext_resource type="PackedScene" uid="uid://bplayer001scene" path="res://scenes/player.tscn" id="2_player"]
@@ -9,6 +9,9 @@
 
 [sub_resource type="Sky" id="Sky_env"]
 sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_teammate"]
+albedo_color = Color(0.9, 0.3, 0.25, 1)
 
 [sub_resource type="Environment" id="Environment_main"]
 background_mode = 2
@@ -23,6 +26,14 @@ ambient_light_energy = 0.4
 
 [node name="Player" parent="." instance=ExtResource("2_player")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+
+[node name="Teammate" parent="." instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0.1, -6)
+is_user_controlled = false
+possession_debug_enabled = false
+
+[node name="MeshInstance3D" parent="Teammate" index="1"]
+surface_material_override/0 = SubResource("StandardMaterial3D_teammate")
 
 [node name="Ball" parent="." instance=ExtResource("3_ball")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.21, -2)
@@ -41,3 +52,5 @@ shadow_enabled = true
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Environment_main")
+
+[editable path="Teammate"]

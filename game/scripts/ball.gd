@@ -59,6 +59,9 @@ const LOOSE_BALL_MASK: int = 3
 @export var emergency_recovery_radius: float = 3.6
 @export var stationary_ball_offset: float = 0.38
 
+@export_group("Passing")
+@export var passer_reacquire_block_time: float = 0.4
+
 @export_group("Simple Possession Control")
 @export var use_simple_possession_control: bool = true
 @export var simple_position_gain: float = 7.0
@@ -75,6 +78,8 @@ var _possessor: PlayerCharacter = null
 var _touch_cooldown: float = 0.0
 var _expected_flat_velocity: Vector3 = Vector3.ZERO
 var _dribble_enabled: bool = false
+var _reacquire_blocked_player: PlayerCharacter = null
+var _reacquire_block_timer: float = 0.0
 var _turn_state: TurnState = TurnState.NORMAL_DRIBBLE
 var _turn_state_timer: float = 0.0
 var _stable_dribble_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
@@ -111,6 +116,11 @@ func _ready() -> void:
 
 func _physics_process(delta: float) -> void:
 	_touch_cooldown = maxf(_touch_cooldown - delta, 0.0)
+
+	if _reacquire_block_timer > 0.0:
+		_reacquire_block_timer = maxf(_reacquire_block_timer - delta, 0.0)
+		if _reacquire_block_timer <= 0.0:
+			_reacquire_blocked_player = null
 
 	if _has_valid_possessor() and _dribble_enabled:
 		_current_movement_state = _possessor.get_movement_state()
@@ -153,6 +163,8 @@ func try_acquire_possession(player: PlayerCharacter) -> bool:
 		return false
 	if player == null or not is_instance_valid(player):
 		return false
+	if player == _reacquire_blocked_player and _reacquire_block_timer > 0.0:
+		return false
 
 	_possession_state = PossessionState.POSSESSED
 	_possessor = player
@@ -192,6 +204,24 @@ func get_possession_state_name() -> String:
 
 func get_turn_state() -> TurnState:
 	return _turn_state
+
+
+func perform_pass(direction: Vector3, speed: float) -> void:
+	if _possession_state != PossessionState.POSSESSED:
+		return
+
+	var passer: PlayerCharacter = _possessor
+	var flat_direction: Vector3 = Vector3(direction.x, 0.0, direction.z)
+	if flat_direction.length_squared() <= 0.0001:
+		flat_direction = passer.get_facing_direction()
+	flat_direction = flat_direction.normalized()
+
+	release_for_pass()
+
+	_reacquire_blocked_player = passer
+	_reacquire_block_timer = passer_reacquire_block_time
+	sleeping = false
+	linear_velocity = flat_direction * maxf(speed, 0.0)
 
 
 func release_for_pass() -> void:
