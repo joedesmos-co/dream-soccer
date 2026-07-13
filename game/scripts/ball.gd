@@ -32,6 +32,9 @@ const BALL_COLLISION_LAYER: int = 3
 @export var possession_acquisition_radius: float = 1.1
 @export var normal_control_radius: float = 2.0
 @export var emergency_recovery_radius: float = 3.6
+@export var loose_ball_max_controllable_speed: float = 4.0
+@export var loose_ball_max_ground_height: float = 0.6
+@export var reacquisition_cooldown: float = 0.25
 
 @export_group("Touch Dribbling")
 @export var walk_touch_distance: float = 0.45
@@ -67,14 +70,17 @@ const BALL_COLLISION_LAYER: int = 3
 @export var debug_enabled: bool = false
 
 var _physics_material: PhysicsMaterial
-var _player: CharacterBody3D
+var _player: PlayerCharacter = null
 var _possession_state: PossessionState = PossessionState.LOOSE
-var _possessor: CharacterBody3D = null
+var _possessor: PlayerCharacter = null
 var _touch_cooldown: float = 0.0
 var _expected_flat_velocity: Vector3 = Vector3.ZERO
 var _reacquire_cooldown: float = 0.0
+var _possession_grace_timer: float = 0.0
 var _emergency_recovery_active: bool = false
 var _possession_collision_exempt: bool = false
+var _default_ball_collision_mask: int = 0
+var _default_player_collision_mask: int = 0
 var _turn_state: TurnState = TurnState.NORMAL_DRIBBLE
 var _turn_state_timer: float = 0.0
 var _stable_dribble_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
@@ -83,6 +89,9 @@ var _current_turn_angle: float = 0.0
 var _debug_target: Vector3 = Vector3.ZERO
 var _debug_target_marker: MeshInstance3D
 var _debug_label: Label3D
+
+@onready var _acquisition_area: Area3D = $AcquisitionArea
+@onready var _acquisition_shape: CollisionShape3D = $AcquisitionArea/CollisionShape3D
 
 
 func _ready() -> void:
@@ -96,12 +105,33 @@ func _ready() -> void:
 	_physics_material.bounce = bounce
 	physics_material_override = _physics_material
 
+	_default_ball_collision_mask = collision_mask
+	_update_acquisition_area_radius()
+
 	call_deferred("_resolve_player")
 	call_deferred("_setup_debug_visuals")
 
 
 func _resolve_player() -> void:
-	_player = get_tree().get_first_node_in_group("player") as CharacterBody3D
+	if _player != null and is_instance_valid(_player):
+		return
+
+	var candidate: Node = get_tree().get_first_node_in_group("player")
+	if candidate is PlayerCharacter:
+		_player = candidate
+		_default_player_collision_mask = _player.collision_mask
+		_debug_acquisition("Resolved PlayerCharacter: %s" % _player.name)
+	elif candidate != null:
+		_debug_acquisition("Player group node is not PlayerCharacter: %s" % candidate.get_class())
+	else:
+		_debug_acquisition("No node found in group 'player'")
+
+
+func _update_acquisition_area_radius() -> void:
+	if _acquisition_shape == null or _acquisition_shape.shape is not SphereShape3D:
+		return
+	var sphere: SphereShape3D = _acquisition_shape.shape as SphereShape3D
+	sphere.radius = possession_acquisition_radius
 
 
 func _setup_debug_visuals() -> void:
@@ -132,6 +162,14 @@ func _setup_debug_visuals() -> void:
 func _physics_process(delta: float) -> void:
 	_touch_cooldown = maxf(_touch_cooldown - delta, 0.0)
 	_reacquire_cooldown = maxf(_reacquire_cooldown - delta, 0.0)
+	_possession_grace_timer = maxf(_possession_grace_timer - delta, 0.0)
+
+	if _player == null:
+		_resolve_player()
+
+	if _possession_state == PossessionState.LOOSE:
+		_restore_loose_ball_collision()
+
 	_update_possession_state()
 	if _possession_state == PossessionState.POSSESSED and _possessor != null:
 		_update_turn_state(delta)
@@ -154,7 +192,7 @@ func has_possession() -> bool:
 	return _possession_state == PossessionState.POSSESSED
 
 
-func get_possessor() -> CharacterBody3D:
+func get_possessor() -> PlayerCharacter:
 	return _possessor
 
 
@@ -167,87 +205,149 @@ func get_turn_state() -> TurnState:
 
 
 func release_for_pass() -> void:
-	_release_possession()
+	_release_possession(true)
 
 
 func release_for_shot() -> void:
-	_release_possession()
+	_release_possession(true)
 
 
 func release_for_tackle() -> void:
-	_release_possession()
+	_release_possession(true)
 
 
 func release_for_deflection() -> void:
-	_release_possession()
+	_release_possession(true)
 
 
 func release_as_loose_ball() -> void:
-	_release_possession()
+	_release_possession(true)
 
 
-func _release_possession() -> void:
-	_set_possession_collision_exempt(false)
-	if _possessor != null:
-		if _possessor.has_method("notify_possession_lost"):
-			_possessor.notify_possession_lost()
+func _release_possession(apply_reacquire_cooldown: bool = true) -> void:
+	var releasing_possessor: PlayerCharacter = _possessor
+	_restore_loose_ball_collision(releasing_possessor)
+	if releasing_possessor != null and releasing_possessor.has_method("notify_possession_lost"):
+		releasing_possessor.notify_possession_lost()
 	_possession_state = PossessionState.LOOSE
 	_possessor = null
 	_emergency_recovery_active = false
-	_reacquire_cooldown = 0.25
+	if apply_reacquire_cooldown:
+		_reacquire_cooldown = reacquisition_cooldown
 	_expected_flat_velocity = Vector3.ZERO
 	_turn_state = TurnState.NORMAL_DRIBBLE
 	_turn_state_timer = 0.0
+	_debug_acquisition("Possession released")
 
 
-func _acquire_possession(player: CharacterBody3D) -> void:
+func _acquire_possession(player: PlayerCharacter) -> void:
 	_possession_state = PossessionState.POSSESSED
 	_possessor = player
 	_touch_cooldown = 0.0
 	_turn_state = TurnState.NORMAL_DRIBBLE
 	_turn_state_timer = 0.0
 	_stable_dribble_direction = _get_primary_control_direction()
-	_set_possession_collision_exempt(true)
 	if player.has_method("notify_possession_gained"):
 		player.notify_possession_gained(self)
+	_apply_possession_collision_exempt()
+	_possession_grace_timer = 0.35
+	_debug_acquisition("Possession acquired by %s" % player.name)
 
 
-func _set_possession_collision_exempt(enabled: bool) -> void:
-	if _possession_collision_exempt == enabled:
+func _restore_loose_ball_collision(player: PlayerCharacter = null) -> void:
+	var target_player: PlayerCharacter = player if player != null else _player
+	collision_mask = _default_ball_collision_mask
+	set_collision_mask_value(PLAYER_COLLISION_LAYER, true)
+	if target_player != null and is_instance_valid(target_player):
+		target_player.collision_mask = _default_player_collision_mask
+		target_player.set_collision_mask_value(BALL_COLLISION_LAYER, true)
+	_possession_collision_exempt = false
+
+
+func _apply_possession_collision_exempt() -> void:
+	if _possessor == null:
 		return
-
-	_possession_collision_exempt = enabled
-	if _possessor != null:
-		_possessor.set_collision_mask_value(BALL_COLLISION_LAYER, not enabled)
-	set_collision_mask_value(PLAYER_COLLISION_LAYER, not enabled)
+	_possessor.set_collision_mask_value(BALL_COLLISION_LAYER, false)
+	set_collision_mask_value(PLAYER_COLLISION_LAYER, false)
+	_possession_collision_exempt = true
 
 
 func _update_possession_state() -> void:
-	if _player == null:
-		return
-
 	if _possession_state == PossessionState.LOOSE:
 		if _reacquire_cooldown > 0.0:
+			_debug_acquisition("Acquisition blocked by cooldown: %.2fs" % _reacquire_cooldown)
 			return
-		var distance: float = _flat_distance_to(_player.global_position)
-		var ball_speed: float = _get_flat_speed()
-		if distance <= possession_acquisition_radius and (ball_speed < 4.0 or _player.is_moving(0.25)):
-			_acquire_possession(_player)
+		_try_acquire_from_candidates()
 		return
 
 	if _possessor == null:
-		release_as_loose_ball()
+		_release_possession(false)
 		return
 
 	var distance_to_possessor: float = _flat_distance_to(_possessor.global_position)
 	_emergency_recovery_active = distance_to_possessor > normal_control_radius
 
 	if distance_to_possessor > emergency_recovery_radius:
+		_debug_acquisition("Emergency release: distance %.2f" % distance_to_possessor)
 		release_as_loose_ball()
 		return
 
 	if _detect_external_impulse():
+		_debug_acquisition("External impulse release")
 		release_as_loose_ball()
+
+
+func _try_acquire_from_candidates() -> void:
+	var candidates: Array[PlayerCharacter] = _get_acquisition_candidates()
+	if candidates.is_empty():
+		return
+
+	for candidate: PlayerCharacter in candidates:
+		var distance: float = _flat_distance_to(candidate.global_position)
+		_debug_acquisition("Candidate detected: %s distance %.2f" % [candidate.name, distance])
+		if not _passes_acquisition_conditions(candidate, distance):
+			continue
+		_acquire_possession(candidate)
+		return
+
+
+func _get_acquisition_candidates() -> Array[PlayerCharacter]:
+	var candidates: Array[PlayerCharacter] = []
+
+	if _acquisition_area != null:
+		for body: Node3D in _acquisition_area.get_overlapping_bodies():
+			if body is PlayerCharacter and body not in candidates:
+				candidates.append(body)
+
+	if _player != null and _player not in candidates:
+		var distance: float = _flat_distance_to(_player.global_position)
+		if distance <= possession_acquisition_radius:
+			candidates.append(_player)
+
+	return candidates
+
+
+func _passes_acquisition_conditions(candidate: PlayerCharacter, distance: float) -> bool:
+	if distance > possession_acquisition_radius:
+		_debug_acquisition("Failed: outside radius (%.2f > %.2f)" % [distance, possession_acquisition_radius])
+		return false
+	if global_position.y > loose_ball_max_ground_height:
+		_debug_acquisition("Failed: ball too high (y=%.2f)" % global_position.y)
+		return false
+	if _get_flat_speed() > loose_ball_max_controllable_speed:
+		_debug_acquisition("Failed: ball too fast (%.2f)" % _get_flat_speed())
+		return false
+	if candidate == null or not is_instance_valid(candidate):
+		_debug_acquisition("Failed: invalid candidate")
+		return false
+
+	_debug_acquisition("Acquisition conditions passed for %s" % candidate.name)
+	return true
+
+
+func _debug_acquisition(message: String) -> void:
+	if debug_enabled:
+		print("[Ball Acquisition] ", message)
 
 
 func _update_turn_state(delta: float) -> void:
@@ -347,6 +447,8 @@ func _get_primary_control_direction() -> Vector3:
 
 
 func _detect_external_impulse() -> bool:
+	if _possession_grace_timer > 0.0:
+		return false
 	if _turn_state != TurnState.NORMAL_DRIBBLE:
 		return false
 	var actual: Vector3 = _get_flat_velocity()
