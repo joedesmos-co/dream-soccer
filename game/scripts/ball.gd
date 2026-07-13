@@ -26,7 +26,7 @@ const LOOSE_BALL_MASK: int = 3
 @export var angular_damping: float = 0.8
 @export var friction: float = 0.8
 @export var bounce: float = 0.6
-@export var max_speed: float = 15.0
+@export var max_speed: float = 22.0
 
 @export_group("Touch Dribbling")
 @export var walk_touch_distance: float = 0.45
@@ -61,6 +61,7 @@ const LOOSE_BALL_MASK: int = 3
 
 @export_group("Passing")
 @export var passer_reacquire_block_time: float = 0.4
+@export var shooter_reacquire_block_time: float = 0.5
 
 @export_group("Simple Possession Control")
 @export var use_simple_possession_control: bool = true
@@ -80,6 +81,7 @@ var _expected_flat_velocity: Vector3 = Vector3.ZERO
 var _dribble_enabled: bool = false
 var _reacquire_blocked_player: PlayerCharacter = null
 var _reacquire_block_timer: float = 0.0
+var _match_play_enabled: bool = true
 var _turn_state: TurnState = TurnState.NORMAL_DRIBBLE
 var _turn_state_timer: float = 0.0
 var _stable_dribble_direction: Vector3 = Vector3(0.0, 0.0, -1.0)
@@ -122,7 +124,7 @@ func _physics_process(delta: float) -> void:
 		if _reacquire_block_timer <= 0.0:
 			_reacquire_blocked_player = null
 
-	if _has_valid_possessor() and _dribble_enabled:
+	if _has_valid_possessor() and _dribble_enabled and _match_play_enabled:
 		_current_movement_state = _possessor.get_movement_state()
 		if use_simple_possession_control:
 			_current_dribble_target = _compute_simple_dribble_target(_current_movement_state)
@@ -143,7 +145,7 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 	if state.sleeping and _possession_state == PossessionState.POSSESSED:
 		state.sleeping = false
 
-	if _has_valid_possessor() and _dribble_enabled:
+	if _has_valid_possessor() and _dribble_enabled and _match_play_enabled:
 		if use_simple_possession_control:
 			_apply_simple_possession_control(state)
 		else:
@@ -159,6 +161,8 @@ func is_loose() -> bool:
 
 
 func try_acquire_possession(player: PlayerCharacter) -> bool:
+	if not _match_play_enabled:
+		return false
 	if _possession_state != PossessionState.LOOSE:
 		return false
 	if player == null or not is_instance_valid(player):
@@ -207,6 +211,8 @@ func get_turn_state() -> TurnState:
 
 
 func perform_pass(direction: Vector3, speed: float) -> void:
+	if not _match_play_enabled:
+		return
 	if _possession_state != PossessionState.POSSESSED:
 		return
 
@@ -220,6 +226,26 @@ func perform_pass(direction: Vector3, speed: float) -> void:
 
 	_reacquire_blocked_player = passer
 	_reacquire_block_timer = passer_reacquire_block_time
+	sleeping = false
+	linear_velocity = flat_direction * maxf(speed, 0.0)
+
+
+func perform_shot(direction: Vector3, speed: float) -> void:
+	if not _match_play_enabled:
+		return
+	if _possession_state != PossessionState.POSSESSED:
+		return
+
+	var shooter: PlayerCharacter = _possessor
+	var flat_direction: Vector3 = Vector3(direction.x, 0.0, direction.z)
+	if flat_direction.length_squared() <= 0.0001:
+		flat_direction = shooter.get_facing_direction()
+	flat_direction = flat_direction.normalized()
+
+	release_for_shot()
+
+	_reacquire_blocked_player = shooter
+	_reacquire_block_timer = shooter_reacquire_block_time
 	sleeping = false
 	linear_velocity = flat_direction * maxf(speed, 0.0)
 
@@ -242,6 +268,39 @@ func release_for_deflection() -> void:
 
 func release_as_loose_ball() -> void:
 	_release_possession()
+
+
+func set_match_play_enabled(enabled: bool) -> void:
+	_match_play_enabled = enabled
+	if not enabled:
+		_dribble_enabled = false
+	else:
+		freeze = false
+
+
+func is_match_play_enabled() -> bool:
+	return _match_play_enabled
+
+
+func force_match_reset(position: Vector3) -> void:
+	if _possession_state == PossessionState.POSSESSED:
+		_release_possession()
+
+	for body: CollisionObject3D in get_collision_exceptions():
+		remove_collision_exception_with(body)
+
+	_reacquire_blocked_player = null
+	_reacquire_block_timer = 0.0
+	_possession_state = PossessionState.LOOSE
+	_possessor = null
+	_dribble_enabled = false
+	_expected_flat_velocity = Vector3.ZERO
+	global_position = position
+	linear_velocity = Vector3.ZERO
+	angular_velocity = Vector3.ZERO
+	freeze = true
+	sleeping = true
+	can_sleep = true
 
 
 func _release_possession() -> void:

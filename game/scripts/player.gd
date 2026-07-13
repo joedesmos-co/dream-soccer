@@ -14,12 +14,16 @@ const LOOSE_PLAYER_MASK: int = 5
 const POSSESSION_AREA_MASK: int = 4
 
 @export var is_user_controlled: bool = true
+@export var team_id: int = 0
 @export var walk_speed: float = 5.0
 @export var sprint_speed: float = 8.5
 @export var acceleration: float = 12.0
 @export var rotation_speed: float = 10.0
 @export var gravity: float = 9.8
 @export var short_pass_speed: float = 9.0
+@export var min_shot_speed: float = 8.0
+@export var max_shot_speed: float = 18.0
+@export var max_shot_charge_time: float = 1.0
 @export var possession_debug_enabled: bool = true
 
 @onready var mesh: MeshInstance3D = $MeshInstance3D
@@ -33,6 +37,10 @@ var _possessed_ball: Node3D = null
 var _dribble_speed_multiplier: float = 1.0
 var _dribble_rotation_speed: float = -1.0
 var _tracked_ball: Node3D = null
+var _is_charging_shot: bool = false
+var _shot_charge_time: float = 0.0
+var _match_controls_enabled: bool = true
+var _possession_acquisition_enabled: bool = true
 
 
 func _ready() -> void:
@@ -51,11 +59,11 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
-	if is_user_controlled:
+	if is_user_controlled and _match_controls_enabled:
 		_update_requested_move_direction()
 
 	var input_dir: Vector2 = Vector2.ZERO
-	if is_user_controlled:
+	if is_user_controlled and _match_controls_enabled:
 		input_dir = Input.get_vector(
 			InputActions.MOVE_LEFT,
 			InputActions.MOVE_RIGHT,
@@ -90,12 +98,17 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	_update_last_move_direction()
 
-	if not has_possession():
+	if not has_possession() and _possession_acquisition_enabled:
 		for body: Node3D in _possession_area.get_overlapping_bodies():
 			_try_acquire_from_body(body)
 
-	if is_user_controlled and has_possession() and Input.is_action_just_pressed(InputActions.SHORT_PASS):
-		perform_short_pass()
+	if is_user_controlled and _match_controls_enabled and has_possession():
+		_update_shot_input(delta)
+		if Input.is_action_just_pressed(InputActions.SHORT_PASS):
+			_cancel_shot_charge()
+			perform_short_pass()
+	elif is_user_controlled:
+		_cancel_shot_charge()
 
 	_update_possession_debug()
 
@@ -213,6 +226,7 @@ func notify_possession_gained(ball: Node3D) -> void:
 
 func notify_possession_lost() -> void:
 	_possessed_ball = null
+	_cancel_shot_charge()
 	reset_dribble_modifiers()
 
 
@@ -233,6 +247,30 @@ func get_dribble_speed_multiplier() -> float:
 	return _dribble_speed_multiplier
 
 
+func get_team_id() -> int:
+	return team_id
+
+
+func is_same_team(other: PlayerCharacter) -> bool:
+	return other != null and other.team_id == team_id
+
+
+func set_match_controls_enabled(enabled: bool) -> void:
+	_match_controls_enabled = enabled
+	if not enabled:
+		_cancel_shot_charge()
+		velocity = Vector3.ZERO
+
+
+func set_possession_acquisition_enabled(enabled: bool) -> void:
+	_possession_acquisition_enabled = enabled
+
+
+func reset_to_kickoff(position: Vector3) -> void:
+	global_position = position
+	velocity = Vector3.ZERO
+
+
 func perform_short_pass() -> void:
 	var ball: Node3D = _possessed_ball
 	if ball == null or not ball.has_method("perform_pass"):
@@ -240,11 +278,44 @@ func perform_short_pass() -> void:
 	ball.perform_pass(_get_pass_direction(), short_pass_speed)
 
 
+func perform_charged_shot(charge_time: float) -> void:
+	var ball: Node3D = _possessed_ball
+	if ball == null or not ball.has_method("perform_shot"):
+		return
+	ball.perform_shot(_get_shot_direction(), get_charged_shot_speed(charge_time))
+
+
+func get_charged_shot_speed(charge_time: float) -> float:
+	var charge_ratio: float = clampf(charge_time / maxf(max_shot_charge_time, 0.001), 0.0, 1.0)
+	return lerpf(min_shot_speed, max_shot_speed, charge_ratio)
+
+
+func _update_shot_input(delta: float) -> void:
+	if Input.is_action_just_pressed(InputActions.SHOOT):
+		_is_charging_shot = true
+		_shot_charge_time = 0.0
+
+	if not _is_charging_shot:
+		return
+
+	if Input.is_action_pressed(InputActions.SHOOT):
+		_shot_charge_time = minf(_shot_charge_time + delta, max_shot_charge_time)
+
+	if Input.is_action_just_released(InputActions.SHOOT):
+		perform_charged_shot(_shot_charge_time)
+		_cancel_shot_charge()
+
+
+func _cancel_shot_charge() -> void:
+	_is_charging_shot = false
+	_shot_charge_time = 0.0
+
+
 func _get_pass_direction() -> Vector3:
 	if has_movement_input():
 		return get_requested_move_direction()
 
-	var teammate: PlayerCharacter = _find_nearest_other_player()
+	var teammate: PlayerCharacter = _find_nearest_teammate()
 	if teammate != null:
 		var to_teammate: Vector3 = teammate.global_position - global_position
 		to_teammate.y = 0.0
@@ -254,13 +325,21 @@ func _get_pass_direction() -> Vector3:
 	return get_facing_direction()
 
 
-func _find_nearest_other_player() -> PlayerCharacter:
+func _get_shot_direction() -> Vector3:
+	if has_movement_input():
+		return get_requested_move_direction()
+	return get_facing_direction()
+
+
+func _find_nearest_teammate() -> PlayerCharacter:
 	var nearest: PlayerCharacter = null
 	var nearest_distance: float = INF
 	for node: Node in get_tree().get_nodes_in_group("player"):
 		if node == self or node is not PlayerCharacter:
 			continue
 		var other: PlayerCharacter = node
+		if not is_same_team(other):
+			continue
 		var distance: float = global_position.distance_to(other.global_position)
 		if distance < nearest_distance:
 			nearest_distance = distance
