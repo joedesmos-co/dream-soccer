@@ -24,16 +24,31 @@ const FRAMING_CENTER: Vector2 = Vector2(0.5, 0.58)
 
 var _anchor: Vector3 = Vector3.ZERO
 var _zoom_distance: float = 14.0
+var _follow_player: CharacterBody3D
 
 
 func _ready() -> void:
+	_follow_player = _player
 	_anchor = _get_play_focus()
 	_zoom_distance = minimum_zoom_distance
 	global_position = _compute_camera_world_pos(_anchor)
 	_update_camera_rotation()
 
 
+func set_follow_player(player: CharacterBody3D) -> void:
+	if player == null or not is_instance_valid(player):
+		return
+	_follow_player = player
+	_player = player
+
+
 func _physics_process(delta: float) -> void:
+	var match_ctrl: Node = get_tree().get_first_node_in_group("match")
+	if match_ctrl != null and match_ctrl.has_method("get_active_player"):
+		var active: CharacterBody3D = match_ctrl.get_active_player() as CharacterBody3D
+		if active != null and active != _follow_player:
+			set_follow_player(active)
+
 	var focus: Vector3 = _get_play_focus()
 	_update_zoom(delta)
 	_update_anchor(focus, delta)
@@ -52,7 +67,8 @@ func get_field_forward() -> Vector3:
 
 
 func _get_play_focus() -> Vector3:
-	var player_pos: Vector3 = _player.global_position
+	var tracked_player: CharacterBody3D = _follow_player if _follow_player != null else _player
+	var player_pos: Vector3 = tracked_player.global_position
 	var ball_pos: Vector3 = _ball.global_position
 	var player_flat: Vector3 = Vector3(player_pos.x, 0.0, player_pos.z)
 	var ball_flat: Vector3 = Vector3(ball_pos.x, 0.0, ball_pos.z)
@@ -60,7 +76,8 @@ func _get_play_focus() -> Vector3:
 
 
 func _update_zoom(delta: float) -> void:
-	var player_flat: Vector3 = Vector3(_player.global_position.x, 0.0, _player.global_position.z)
+	var tracked_player: CharacterBody3D = _follow_player if _follow_player != null else _player
+	var player_flat: Vector3 = Vector3(tracked_player.global_position.x, 0.0, tracked_player.global_position.z)
 	var ball_flat: Vector3 = Vector3(_ball.global_position.x, 0.0, _ball.global_position.z)
 	var separation: float = player_flat.distance_to(ball_flat)
 	var zoom_blend: float = clampf(separation / MAX_SEPARATION_FOR_ZOOM, 0.0, 1.0)

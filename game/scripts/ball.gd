@@ -160,6 +160,21 @@ func is_loose() -> bool:
 	return _possession_state == PossessionState.LOOSE
 
 
+func apply_goalkeeper_deflection(direction: Vector3, strength: float) -> bool:
+	if not _match_play_enabled or not is_loose():
+		return false
+
+	var flat_direction: Vector3 = Vector3(direction.x, 0.0, direction.z)
+	if flat_direction.length_squared() <= 0.0001:
+		return false
+	flat_direction = flat_direction.normalized()
+
+	sleeping = false
+	freeze = false
+	linear_velocity = flat_direction * maxf(strength, 0.0)
+	return true
+
+
 func try_acquire_possession(player: PlayerCharacter) -> bool:
 	if not _match_play_enabled:
 		return false
@@ -168,6 +183,9 @@ func try_acquire_possession(player: PlayerCharacter) -> bool:
 	if player == null or not is_instance_valid(player):
 		return false
 	if player == _reacquire_blocked_player and _reacquire_block_timer > 0.0:
+		return false
+	# Guard against stale Area overlaps after teleports/resets.
+	if _flat_distance_to(player.global_position) > 1.15:
 		return false
 
 	_possession_state = PossessionState.POSSESSED
@@ -283,14 +301,13 @@ func is_match_play_enabled() -> bool:
 
 
 func force_match_reset(position: Vector3) -> void:
+	var previous_possessor: PlayerCharacter = _possessor if _possession_state == PossessionState.POSSESSED else null
 	if _possession_state == PossessionState.POSSESSED:
 		_release_possession()
 
 	for body: CollisionObject3D in get_collision_exceptions():
 		remove_collision_exception_with(body)
 
-	_reacquire_blocked_player = null
-	_reacquire_block_timer = 0.0
 	_possession_state = PossessionState.LOOSE
 	_possessor = null
 	_dribble_enabled = false
@@ -301,6 +318,14 @@ func force_match_reset(position: Vector3) -> void:
 	freeze = true
 	sleeping = true
 	can_sleep = true
+
+	# Prevent immediate reacquire from stale PossessionArea overlaps after teleport.
+	if previous_possessor != null:
+		_reacquire_blocked_player = previous_possessor
+		_reacquire_block_timer = 0.35
+	else:
+		_reacquire_blocked_player = null
+		_reacquire_block_timer = 0.0
 
 
 func _release_possession() -> void:

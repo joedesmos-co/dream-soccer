@@ -1,0 +1,30 @@
+[gd_scene load_steps=5 format=3 uid="uid://bgoalkeeper001scene"]
+
+[ext_resource type="Script" path="res://scripts/goalkeeper.gd" id="1_goalkeeper_script"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gk"]
+albedo_color = Color(0.95, 0.85, 0.15, 1)
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_gk"]
+radius = 0.38
+height = 1.75
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_gk"]
+radius = 0.38
+height = 1.75
+
+[node name="Goalkeeper" type="CharacterBody3D"]
+collision_layer = 2
+collision_mask = 5
+floor_stop_on_slope = true
+floor_max_angle = 0.785398
+script = ExtResource("1_goalkeeper_script")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.875, 0)
+shape = SubResource("CapsuleShape3D_gk")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.875, 0)
+mesh = SubResource("CapsuleMesh_gk")
+surface_material_override/0 = SubResource("StandardMaterial3D_gk")

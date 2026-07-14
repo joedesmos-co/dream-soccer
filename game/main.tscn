@@ -1,4 +1,4 @@
-[gd_scene load_steps=10 format=3 uid="uid://27iapsqeihbc"]
+[gd_scene load_steps=13 format=3 uid="uid://27iapsqeihbc"]
 
 [ext_resource type="PackedScene" uid="uid://bpracticefield001" path="res://scenes/practice_field.tscn" id="1_field"]
 [ext_resource type="PackedScene" uid="uid://bplayer001scene" path="res://scenes/player.tscn" id="2_player"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/broadcast_camera.gd" id="4_broadcast_camera"]
 [ext_resource type="PackedScene" uid="uid://bgoal001scene" path="res://scenes/goal.tscn" id="5_goal"]
 [ext_resource type="Script" path="res://scripts/match_controller.gd" id="6_match_controller"]
+[ext_resource type="PackedScene" uid="uid://bgoalkeeper001scene" path="res://scenes/goalkeeper.tscn" id="7_goalkeeper"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 
@@ -14,6 +15,12 @@ sky_material = SubResource("ProceduralSkyMaterial_sky")
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_teammate"]
 albedo_color = Color(0.9, 0.3, 0.25, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_opponent"]
+albedo_color = Color(0.15, 0.15, 0.18, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_away_gk"]
+albedo_color = Color(0.2, 0.75, 0.35, 1)
 
 [sub_resource type="Environment" id="Environment_main"]
 background_mode = 2
@@ -41,18 +48,52 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 7.5)
 [node name="GoalTrigger" parent="Goals/SouthGoal" index="4"]
 scoring_team_id = 0
 
+[node name="Goalkeepers" type="Node3D" parent="."]
+
+[node name="NorthGoalkeeper" parent="Goalkeepers" instance=ExtResource("7_goalkeeper")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, -6.8)
+team_id = 0
+goal_center = Vector3(0, 0.1, -6.8)
+goal_forward = Vector3(0, 0, -1)
+zone_min = Vector3(-2.2, 0.1, -7.25)
+zone_max = Vector3(2.2, 0.1, -5.8)
+
+[node name="SouthGoalkeeper" parent="Goalkeepers" instance=ExtResource("7_goalkeeper")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 6.8)
+team_id = 1
+goal_center = Vector3(0, 0.1, 6.8)
+goal_forward = Vector3(0, 0, 1)
+zone_min = Vector3(-2.2, 0.1, 5.8)
+zone_max = Vector3(2.2, 0.1, 7.25)
+
+[node name="MeshInstance3D" parent="Goalkeepers/SouthGoalkeeper" index="1"]
+surface_material_override/0 = SubResource("StandardMaterial3D_away_gk")
+
 [node name="Player" parent="." instance=ExtResource("2_player")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
 team_id = 0
 
 [node name="Teammate" parent="." instance=ExtResource("2_player")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0.1, -6)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, 0.1, -3)
 is_user_controlled = false
 team_id = 0
 possession_debug_enabled = false
+ai_enabled = true
+ai_debug_enabled = false
 
 [node name="MeshInstance3D" parent="Teammate" index="1"]
 surface_material_override/0 = SubResource("StandardMaterial3D_teammate")
+
+[node name="Opponent" parent="." instance=ExtResource("2_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5, 0.1, 3)
+is_user_controlled = false
+team_id = 1
+possession_debug_enabled = false
+ai_enabled = true
+ai_debug_enabled = false
+
+[node name="MeshInstance3D" parent="Opponent" index="1"]
+surface_material_override/0 = SubResource("StandardMaterial3D_opponent")
 
 [node name="Ball" parent="." instance=ExtResource("3_ball")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.21, -2)
@@ -88,5 +129,8 @@ text = "HOME 0  -  0 AWAY"
 horizontal_alignment = 1
 
 [editable path="Teammate"]
+[editable path="Opponent"]
 [editable path="Goals/NorthGoal"]
 [editable path="Goals/SouthGoal"]
+[editable path="Goalkeepers/NorthGoalkeeper"]
+[editable path="Goalkeepers/SouthGoalkeeper"]
